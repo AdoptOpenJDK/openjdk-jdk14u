@@ -28,7 +28,6 @@
 #include "gc/shared/gcTimer.hpp"
 #include "gc/shared/gcTrace.hpp"
 #include "gc/shared/gcWhen.hpp"
-#include "gc/shenandoah/shenandoahAllocTracker.hpp"
 #include "gc/shenandoah/shenandoahCollectorPolicy.hpp"
 #include "gc/shenandoah/shenandoahMarkCompact.hpp"
 #include "gc/shenandoah/shenandoahHeap.hpp"
@@ -107,12 +106,11 @@ ShenandoahGCPhase::ShenandoahGCPhase(const ShenandoahPhaseTimings::Phase phase) 
           "Must be set by these threads");
   _parent_phase = _current_phase;
   _current_phase = phase;
-
-  _heap->phase_timings()->record_phase_start(_phase);
+  _start = os::elapsedTime();
 }
 
 ShenandoahGCPhase::~ShenandoahGCPhase() {
-  _heap->phase_timings()->record_phase_end(_phase);
+  _heap->phase_timings()->record_phase_time(_phase, os::elapsedTime() - _start);
   _current_phase = _parent_phase;
 }
 
