@@ -301,17 +301,14 @@ class ShenandoahUpdateThreadRootsTask : public AbstractGangTask {
 private:
   ShenandoahThreadRoots           _thread_roots;
   ShenandoahPhaseTimings::Phase   _phase;
+  ShenandoahGCWorkerPhase         _worker_phase;
 public:
   ShenandoahUpdateThreadRootsTask(bool is_par, ShenandoahPhaseTimings::Phase phase) :
     AbstractGangTask("Shenandoah Update Thread Roots"),
     _thread_roots(is_par),
-    _phase(phase) {
-    ShenandoahHeap::heap()->phase_timings()->record_workers_start(_phase);
-  }
+    _phase(phase),
+    _worker_phase(phase) {}
 
-  ~ShenandoahUpdateThreadRootsTask() {
-    ShenandoahHeap::heap()->phase_timings()->record_workers_end(_phase);
-  }
   void work(uint worker_id) {
     ShenandoahUpdateRefsClosure cl;
     _thread_roots.oops_do(&cl, NULL, worker_id);
@@ -693,27 +690,6 @@ public:
   }
 };
 
-class ShenandoahPrecleanKeepAliveUpdateClosure : public OopClosure {
-private:
-  ShenandoahObjToScanQueue* _queue;
-  ShenandoahHeap* _heap;
-  ShenandoahMarkingContext* const _mark_context;
-
-  template <class T>
-  inline void do_oop_work(T* p) {
-    ShenandoahConcurrentMark::mark_through_ref<T, CONCURRENT, NO_DEDUP>(p, _heap, _queue, _mark_context);
-  }
-
-public:
-  ShenandoahPrecleanKeepAliveUpdateClosure(ShenandoahObjToScanQueue* q) :
-    _queue(q),
-    _heap(ShenandoahHeap::heap()),
-    _mark_context(_heap->marking_context()) {}
-
-  void do_oop(narrowOop* p) { do_oop_work(p); }
-  void do_oop(oop* p)       { do_oop_work(p); }
-};
-
 class ShenandoahPrecleanTask : public AbstractGangTask {
 private:
   ReferenceProcessor* _rp;
@@ -728,27 +704,19 @@ public:
     ShenandoahParallelWorkerSession worker_session(worker_id);
 
     ShenandoahHeap* sh = ShenandoahHeap::heap();
+    assert(!sh->has_forwarded_objects(), "No forwarded objects expected here");
 
     ShenandoahObjToScanQueue* q = sh->concurrent_mark()->get_queue(worker_id);
 
     ShenandoahCancelledGCYieldClosure yield;
     ShenandoahPrecleanCompleteGCClosure complete_gc;
 
-    if (sh->has_forwarded_objects()) {
-      ShenandoahForwardedIsAliveClosure is_alive;
-      ShenandoahPrecleanKeepAliveUpdateClosure keep_alive(q);
-      ResourceMark rm;
-      _rp->preclean_discovered_references(&is_alive, &keep_alive,
-                                          &complete_gc, &yield,
-                                          NULL);
-    } else {
-      ShenandoahIsAliveClosure is_alive;
-      ShenandoahCMKeepAliveClosure keep_alive(q);
-      ResourceMark rm;
-      _rp->preclean_discovered_references(&is_alive, &keep_alive,
-                                          &complete_gc, &yield,
-                                          NULL);
-    }
+    ShenandoahIsAliveClosure is_alive;
+    ShenandoahCMKeepAliveClosure keep_alive(q);
+    ResourceMark rm;
+    _rp->preclean_discovered_references(&is_alive, &keep_alive,
+                                        &complete_gc, &yield,
+                                        NULL);
   }
 };
 

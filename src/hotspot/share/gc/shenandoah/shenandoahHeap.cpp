@@ -1381,6 +1381,7 @@ void ShenandoahHeap::op_init_mark() {
 
   assert(marking_context()->is_bitmap_clear(), "need clear marking bitmap");
   assert(!marking_context()->is_complete(), "should not be complete");
+  assert(!has_forwarded_objects(), "No forwarded objects on this path");
 
   if (ShenandoahVerify) {
     verifier()->verify_before_concmark();
@@ -1447,6 +1448,7 @@ public:
 
 void ShenandoahHeap::op_final_mark() {
   assert(ShenandoahSafepoint::is_at_shenandoah_safepoint(), "Should be at safepoint");
+  assert(!has_forwarded_objects(), "No forwarded objects on this path");
 
   // It is critical that we
   // evacuate roots right after finishing marking, so that we don't
@@ -1460,16 +1462,6 @@ void ShenandoahHeap::op_final_mark() {
     mark_complete_marking_context();
 
     parallel_cleaning(false /* full gc*/);
-
-    if (has_forwarded_objects()) {
-      // Degen may be caused by failed evacuation of roots
-      if (is_degenerated_gc_in_progress()) {
-        concurrent_mark()->update_roots(ShenandoahPhaseTimings::degen_gc_update_roots);
-      } else {
-        concurrent_mark()->update_thread_roots(ShenandoahPhaseTimings::update_roots);
-      }
-      set_has_forwarded_objects(false);
-   }
 
     if (ShenandoahVerify) {
       verifier()->verify_roots_no_forwarded();
@@ -2034,8 +2026,9 @@ void ShenandoahHeap::stw_process_weak_roots(bool full_gc) {
   ShenandoahPhaseTimings::Phase timing_phase = full_gc ?
                                                ShenandoahPhaseTimings::full_gc_purge_par :
                                                ShenandoahPhaseTimings::purge_par;
-  // Cleanup weak roots
   ShenandoahGCPhase phase(timing_phase);
+
+  // Cleanup weak roots
   if (has_forwarded_objects()) {
     if (is_traversal_mode()) {
       ShenandoahForwardedIsAliveClosure is_alive;
