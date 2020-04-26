@@ -607,12 +607,12 @@ size_t ShenandoahHeap::committed() const {
 }
 
 void ShenandoahHeap::increase_committed(size_t bytes) {
-  assert_heaplock_or_safepoint();
+  shenandoah_assert_heaplocked_or_safepoint();
   _committed += bytes;
 }
 
 void ShenandoahHeap::decrease_committed(size_t bytes) {
-  assert_heaplock_or_safepoint();
+  shenandoah_assert_heaplocked_or_safepoint();
   _committed -= bytes;
 }
 
@@ -816,13 +816,13 @@ HeapWord* ShenandoahHeap::allocate_memory(ShenandoahAllocRequest& req) {
 
     while (result == NULL && _progress_last_gc.is_set()) {
       tries++;
-      control_thread()->handle_alloc_failure(req.size());
+      control_thread()->handle_alloc_failure(req);
       result = allocate_memory_under_lock(req, in_new_region);
     }
 
     while (result == NULL && tries <= ShenandoahFullGCThreshold) {
       tries++;
-      control_thread()->handle_alloc_failure(req.size());
+      control_thread()->handle_alloc_failure(req);
       result = allocate_memory_under_lock(req, in_new_region);
     }
 
@@ -988,8 +988,8 @@ void ShenandoahHeap::print_heap_regions_on(outputStream* st) const {
   st->print_cr("Heap Regions:");
   st->print_cr("EU=empty-uncommitted, EC=empty-committed, R=regular, H=humongous start, HC=humongous continuation, CS=collection set, T=trash, P=pinned");
   st->print_cr("BTE=bottom/top/end, U=used, T=TLAB allocs, G=GCLAB allocs, S=shared allocs, L=live data");
-  st->print_cr("R=root, CP=critical pins, TAMS=top-at-mark-start (previous, next)");
-  st->print_cr("SN=alloc sequence numbers (first mutator, last mutator, first gc, last gc)");
+  st->print_cr("R=root, CP=critical pins, TAMS=top-at-mark-start, UWM=update watermark");
+  st->print_cr("SN=alloc sequence number");
 
   for (size_t i = 0; i < num_regions(); i++) {
     get_region(i)->print_on(st);
@@ -1495,21 +1495,16 @@ void ShenandoahHeap::op_final_mark() {
       sync_pinned_region_status();
     }
 
-    // Trash the collection set left over from previous cycle, if any.
     {
-      ShenandoahGCPhase phase(ShenandoahPhaseTimings::trash_cset);
-      trash_cset_regions();
+      ShenandoahGCPhase phase(ShenandoahPhaseTimings::choose_cset);
+      ShenandoahHeapLocker locker(lock());
+      _collection_set->clear();
+      heuristics()->choose_collection_set(_collection_set);
     }
 
     {
-      ShenandoahGCPhase phase(ShenandoahPhaseTimings::prepare_evac);
-
+      ShenandoahGCPhase phase(ShenandoahPhaseTimings::final_rebuild_freeset);
       ShenandoahHeapLocker locker(lock());
-      _collection_set->clear();
-      _free_set->clear();
-
-      heuristics()->choose_collection_set(_collection_set);
-
       _free_set->rebuild();
     }
 
@@ -1525,6 +1520,13 @@ void ShenandoahHeap::op_final_mark() {
 
       if (ShenandoahVerify) {
         verifier()->verify_before_evacuation();
+      }
+
+      // Remember limit for updating refs. It's guaranteed that we get no from-space-refs written
+      // from here on.
+      for (uint i = 0; i < num_regions(); i++) {
+        ShenandoahHeapRegion* r = get_region(i);
+        r->set_update_watermark(r->top());
       }
 
       set_evacuation_in_progress(true);
@@ -2282,13 +2284,13 @@ private:
     ShenandoahHeapRegion* r = _regions->next();
     ShenandoahMarkingContext* const ctx = _heap->complete_marking_context();
     while (r != NULL) {
-      HeapWord* top_at_start_ur = r->concurrent_iteration_safe_limit();
-      assert (top_at_start_ur >= r->bottom(), "sanity");
+      HeapWord* update_watermark = r->get_update_watermark();
+      assert (update_watermark >= r->bottom(), "sanity");
       if (r->is_active() && !r->is_cset()) {
-        _heap->marked_object_oop_iterate(r, &cl, top_at_start_ur);
+        _heap->marked_object_oop_iterate(r, &cl, update_watermark);
       }
       if (ShenandoahPacing) {
-        _heap->pacer()->report_updaterefs(pointer_delta(top_at_start_ur, r->bottom()));
+        _heap->pacer()->report_updaterefs(pointer_delta(update_watermark, r->bottom()));
       }
       if (_heap->check_cancelled_gc_and_yield(_concurrent)) {
         return;
@@ -2326,10 +2328,6 @@ void ShenandoahHeap::op_init_updaterefs() {
     ShenandoahGCPhase phase(ShenandoahPhaseTimings::init_update_refs_prepare);
 
     make_parsable(true);
-    for (uint i = 0; i < num_regions(); i++) {
-      ShenandoahHeapRegion* r = get_region(i);
-      r->set_concurrent_iteration_safe_limit(r->top());
-    }
 
     // Reset iterator.
     _update_refs_iterator.reset();
@@ -2400,24 +2398,11 @@ void ShenandoahHeap::op_final_updaterefs() {
   }
 
   {
+    ShenandoahGCPhase phase(ShenandoahPhaseTimings::final_update_refs_rebuild_freeset);
     ShenandoahHeapLocker locker(lock());
     _free_set->rebuild();
   }
 }
-
-#ifdef ASSERT
-void ShenandoahHeap::assert_heaplock_owned_by_current_thread() {
-  _lock.assert_owned_by_current_thread();
-}
-
-void ShenandoahHeap::assert_heaplock_not_owned_by_current_thread() {
-  _lock.assert_not_owned_by_current_thread();
-}
-
-void ShenandoahHeap::assert_heaplock_or_safepoint() {
-  _lock.assert_owned_by_current_thread_or_safepoint();
-}
-#endif
 
 void ShenandoahHeap::print_extended_on(outputStream *st) const {
   print_on(st);
@@ -2440,7 +2425,7 @@ bool ShenandoahHeap::is_bitmap_slice_committed(ShenandoahHeapRegion* r, bool ski
 }
 
 bool ShenandoahHeap::commit_bitmap_slice(ShenandoahHeapRegion* r) {
-  assert_heaplock_owned_by_current_thread();
+  shenandoah_assert_heaplocked();
 
   // Bitmaps in special regions do not need commits
   if (_bitmap_region_special) {
@@ -2464,7 +2449,7 @@ bool ShenandoahHeap::commit_bitmap_slice(ShenandoahHeapRegion* r) {
 }
 
 bool ShenandoahHeap::uncommit_bitmap_slice(ShenandoahHeapRegion *r) {
-  assert_heaplock_owned_by_current_thread();
+  shenandoah_assert_heaplocked();
 
   // Bitmaps in special regions do not need uncommits
   if (_bitmap_region_special) {
@@ -2701,7 +2686,7 @@ void ShenandoahHeap::entry_mark() {
   TraceCollectorStats tcs(monitoring_support()->concurrent_collection_counters());
 
   const char* msg = conc_mark_event_message();
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   ShenandoahWorkerScope scope(workers(),
@@ -2717,7 +2702,7 @@ void ShenandoahHeap::entry_evac() {
   TraceCollectorStats tcs(monitoring_support()->concurrent_collection_counters());
 
   static const char* msg = "Concurrent evacuation";
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   ShenandoahWorkerScope scope(workers(),
@@ -2732,7 +2717,7 @@ void ShenandoahHeap::entry_updaterefs() {
   ShenandoahGCPhase phase(ShenandoahPhaseTimings::conc_update_refs);
 
   static const char* msg = "Concurrent update references";
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   ShenandoahWorkerScope scope(workers(),
@@ -2747,7 +2732,7 @@ void ShenandoahHeap::entry_roots() {
   ShenandoahGCPhase phase(ShenandoahPhaseTimings::conc_roots);
 
   static const char* msg = "Concurrent roots processing";
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   ShenandoahWorkerScope scope(workers(),
@@ -2775,7 +2760,7 @@ void ShenandoahHeap::entry_reset() {
   ShenandoahGCPhase phase(ShenandoahPhaseTimings::conc_reset);
 
   static const char* msg = "Concurrent reset";
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   ShenandoahWorkerScope scope(workers(),
@@ -2789,7 +2774,7 @@ void ShenandoahHeap::entry_reset() {
 void ShenandoahHeap::entry_preclean() {
   if (ShenandoahPreclean && process_references()) {
     static const char* msg = "Concurrent precleaning";
-    GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+    GCTraceTime(Info, gc) time(msg);
     EventMark em("%s", msg);
 
     ShenandoahGCPhase conc_preclean(ShenandoahPhaseTimings::conc_preclean);
@@ -2806,7 +2791,7 @@ void ShenandoahHeap::entry_preclean() {
 
 void ShenandoahHeap::entry_traversal() {
   static const char* msg = conc_traversal_event_message();
-  GCTraceTime(Info, gc) time(msg, NULL, GCCause::_no_gc, true);
+  GCTraceTime(Info, gc) time(msg);
   EventMark em("%s", msg);
 
   TraceCollectorStats tcs(monitoring_support()->concurrent_collection_counters());
