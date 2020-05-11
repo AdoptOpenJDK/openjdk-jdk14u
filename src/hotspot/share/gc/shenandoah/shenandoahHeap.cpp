@@ -353,10 +353,10 @@ jint ShenandoahHeap::initialize() {
   // Initialize the rest of GC subsystems
   //
 
-  _liveness_cache = NEW_C_HEAP_ARRAY(jushort*, _max_workers, mtGC);
+  _liveness_cache = NEW_C_HEAP_ARRAY(ShenandoahLiveData*, _max_workers, mtGC);
   for (uint worker = 0; worker < _max_workers; worker++) {
-    _liveness_cache[worker] = NEW_C_HEAP_ARRAY(jushort, _num_regions, mtGC);
-    Copy::fill_to_bytes(_liveness_cache[worker], _num_regions * sizeof(jushort));
+    _liveness_cache[worker] = NEW_C_HEAP_ARRAY(ShenandoahLiveData, _num_regions, mtGC);
+    Copy::fill_to_bytes(_liveness_cache[worker], _num_regions * sizeof(ShenandoahLiveData));
   }
 
   // There should probably be Shenandoah-specific options for these,
@@ -1505,7 +1505,11 @@ void ShenandoahHeap::op_final_mark() {
       assert_pinned_region_status();
     }
 
-    // Force the threads to reacquire their TLABs outside the collection set.
+    // Retire the TLABs, which will force threads to reacquire their TLABs after the pause.
+    // This is needed for two reasons. Strong one: new allocations would be with new freeset,
+    // which would be outside the collection set, so no cset writes would happen there.
+    // Weaker one: new allocations would happen past update watermark, and so less work would
+    // be needed for reference updates (would update the large filler instead).
     {
       ShenandoahGCPhase phase(ShenandoahPhaseTimings::retire_tlabs);
       make_parsable(true);
@@ -2308,10 +2312,6 @@ void ShenandoahHeap::op_init_updaterefs() {
 
   {
     ShenandoahGCPhase phase(ShenandoahPhaseTimings::init_update_refs_prepare);
-
-    make_parsable(true);
-
-    // Reset iterator.
     _update_refs_iterator.reset();
   }
 
@@ -2903,7 +2903,7 @@ const char* ShenandoahHeap::degen_event_message(ShenandoahDegenPoint point) cons
   }
 }
 
-jushort* ShenandoahHeap::get_liveness_cache(uint worker_id) {
+ShenandoahLiveData* ShenandoahHeap::get_liveness_cache(uint worker_id) {
 #ifdef ASSERT
   assert(_liveness_cache != NULL, "sanity");
   assert(worker_id < _max_workers, "sanity");
@@ -2917,9 +2917,9 @@ jushort* ShenandoahHeap::get_liveness_cache(uint worker_id) {
 void ShenandoahHeap::flush_liveness_cache(uint worker_id) {
   assert(worker_id < _max_workers, "sanity");
   assert(_liveness_cache != NULL, "sanity");
-  jushort* ld = _liveness_cache[worker_id];
+  ShenandoahLiveData* ld = _liveness_cache[worker_id];
   for (uint i = 0; i < num_regions(); i++) {
-    jushort live = ld[i];
+    ShenandoahLiveData live = ld[i];
     if (live > 0) {
       ShenandoahHeapRegion* r = get_region(i);
       r->increase_live_data_gc_words(live);
