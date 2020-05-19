@@ -56,9 +56,6 @@ class outputStream;
   // end
 
 #define SHENANDOAH_GC_PHASE_DO(f)                                                      \
-  f(total_pause_gross,                              "Total Pauses (G)")                \
-  f(total_pause,                                    "Total Pauses (N)")                \
-                                                                                       \
   f(init_mark_gross,                                "Pause Init Mark (G)")             \
   f(init_mark,                                      "Pause Init Mark (N)")             \
   f(make_parsable,                                  "  Make Parsable")                 \
@@ -88,7 +85,6 @@ class outputStream;
   f(init_update_refs_gross,                         "Pause Init  Update Refs (G)")     \
   f(init_update_refs,                               "Pause Init  Update Refs (N)")     \
   f(init_update_refs_retire_gclabs,                 "  Retire GCLABs")                 \
-  f(init_update_refs_prepare,                       "  Prepare")                       \
                                                                                        \
   f(final_update_refs_gross,                        "Pause Final Update Refs (G)")     \
   f(final_update_refs,                              "Pause Final Update Refs (N)")     \
